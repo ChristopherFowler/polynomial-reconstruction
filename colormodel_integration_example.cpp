@@ -63,6 +63,11 @@ public:
         double origin_y = -(Ny_TwoHalo * dx) / 2.0;
         double origin_z = -(Nz_TwoHalo * dx) / 2.0;
         
+        if (rank == 0) {
+            std::cout << "  Grid spacing dx: " << dx << "\n";
+            std::cout << "  Domain origin: (" << origin_x << ", " << origin_y << ", " << origin_z << ")\n";
+        }
+        
         for (int i = 0; i < Nx_TwoHalo; i++) {
             m_xs_twohalo[i] = origin_x + i * dx;
         }

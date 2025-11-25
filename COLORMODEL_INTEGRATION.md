@@ -63,6 +63,18 @@ ScaLBL_Shift_Fill(Phi_TwoHalo, Phi, Nx, Ny, Nz);
 // POLYNOMIAL RECONSTRUCTION: Fill inactive sites
 // ============================================================================
 if (m_recon_initialized && m_num_ghost_recon > 0) {
+    // DEBUG: Print reconstruction parameters
+    if (rank == 0 && timestep % 100 == 0) {
+        printf("\n=== DEBUG: Reconstruction at timestep %d ===\n", timestep);
+        printf("  Grid spacing dx: %.6e\n", dx);
+        printf("  Domain size: %dx%dx%d\n", Nx_TwoHalo, Ny_TwoHalo, Nz_TwoHalo);
+        printf("  Total cells: %d\n", N_TwoHalo);
+        printf("  Active cells: %d\n", m_num_active_recon);
+        printf("  Ghost cells: %d\n", m_num_ghost_recon);
+        printf("  tau1: %.6e\n", 2.0 * dx);
+        printf("  tau2: %.6e\n", 4.0 * dx);
+    }
+    
     // Copy Phi_TwoHalo from device
     std::vector<double> h_phi_twohalo(N_TwoHalo);
     ScaLBL_CopyToHost(h_phi_twohalo.data(), Phi_TwoHalo, N_TwoHalo * sizeof(double));
@@ -73,6 +85,52 @@ if (m_recon_initialized && m_num_ghost_recon > 0) {
     for (int idx = 0; idx < N_TwoHalo; idx++) {
         if (m_is_active_site[idx]) {
             active_vals.push_back(h_phi_twohalo[idx]);
+        }
+    }
+    
+    // DEBUG: Check active values statistics
+    if (rank == 0 && timestep % 100 == 0) {
+        double min_val = active_vals[0], max_val = active_vals[0], sum_val = 0.0;
+        int num_zero = 0, num_nan = 0, num_inf = 0;
+        for (size_t i = 0; i < active_vals.size(); i++) {
+            double val = active_vals[i];
+            min_val = std::min(min_val, val);
+            max_val = std::max(max_val, val);
+            sum_val += val;
+            if (val == 0.0) num_zero++;
+            if (std::isnan(val)) num_nan++;
+            if (std::isinf(val)) num_inf++;
+        }
+        printf("  Active values: min=%.6e, max=%.6e, mean=%.6e\n", 
+               min_val, max_val, sum_val / active_vals.size());
+        printf("  Active values: zeros=%d, NaNs=%d, Infs=%d\n", num_zero, num_nan, num_inf);
+        
+        // Print first few active coordinates and values
+        printf("  First 5 active points:\n");
+        int count = 0;
+        for (int idx = 0; idx < N_TwoHalo && count < 5; idx++) {
+            if (m_is_active_site[idx]) {
+                int i = idx / (Ny_TwoHalo * Nz_TwoHalo);
+                int j = (idx / Nz_TwoHalo) % Ny_TwoHalo;
+                int k = idx % Nz_TwoHalo;
+                printf("    [%d,%d,%d] idx=%d coord=(%.4f,%.4f,%.4f) val=%.6e\n",
+                       i, j, k, idx, 
+                       m_xs_twohalo[i], m_ys_twohalo[j], m_zs_twohalo[k],
+                       active_vals[count]);
+                count++;
+            }
+        }
+        
+        // Print first few ghost coordinates
+        printf("  First 5 ghost points:\n");
+        for (int g = 0; g < std::min(5, m_num_ghost_recon); g++) {
+            int i = m_ghost_indices[g * 3 + 0];
+            int j = m_ghost_indices[g * 3 + 1];
+            int k = m_ghost_indices[g * 3 + 2];
+            int idx = i * Ny_TwoHalo * Nz_TwoHalo + j * Nz_TwoHalo + k;
+            printf("    [%d,%d,%d] idx=%d coord=(%.4f,%.4f,%.4f)\n",
+                   i, j, k, idx,
+                   m_xs_twohalo[i], m_ys_twohalo[j], m_zs_twohalo[k]);
         }
     }
     
@@ -100,6 +158,76 @@ if (m_recon_initialized && m_num_ghost_recon > 0) {
         &num_bad
     );
     
+    // DEBUG: Check reconstructed values
+    if (rank == 0 && timestep % 100 == 0) {
+        double min_rec = reconstructed[0], max_rec = reconstructed[0], sum_rec = 0.0;
+        double min_err = rel_err[0], max_err = rel_err[0], sum_err = 0.0;
+        int num_rec_zero = 0, num_rec_nan = 0, num_rec_inf = 0;
+        int num_high_err = 0;
+        
+        for (int i = 0; i < m_num_ghost_recon; i++) {
+            double val = reconstructed[i];
+            double err = rel_err[i];
+            min_rec = std::min(min_rec, val);
+            max_rec = std::max(max_rec, val);
+            sum_rec += val;
+            min_err = std::min(min_err, err);
+            max_err = std::max(max_err, err);
+            sum_err += err;
+            if (val == 0.0) num_rec_zero++;
+            if (std::isnan(val)) num_rec_nan++;
+            if (std::isinf(val)) num_rec_inf++;
+            if (err > 0.2) num_high_err++;
+        }
+        
+        double mean_rec = sum_rec / m_num_ghost_recon;
+        double mean_err = sum_err / m_num_ghost_recon;
+        
+        printf("  Reconstructed values: min=%.6e, max=%.6e, mean=%.6e\n", 
+               min_rec, max_rec, mean_rec);
+        printf("  Reconstructed values: zeros=%d, NaNs=%d, Infs=%d\n", 
+               num_rec_zero, num_rec_nan, num_rec_inf);
+        printf("  Relative errors: min=%.6e, max=%.6e, mean=%.6e\n", 
+               min_err, max_err, mean_err);
+        printf("  High errors (>0.2): %d out of %d (%.1f%%)\n", 
+               num_high_err, m_num_ghost_recon, 100.0 * num_high_err / m_num_ghost_recon);
+        printf("  Bad cells: %d (%.1f%%)\n", 
+               num_bad, 100.0 * num_bad / m_num_ghost_recon);
+        
+        // Print details of first few reconstructed points
+        printf("  First 5 reconstructed points:\n");
+        for (int g = 0; g < std::min(5, m_num_ghost_recon); g++) {
+            int i = m_ghost_indices[g * 3 + 0];
+            int j = m_ghost_indices[g * 3 + 1];
+            int k = m_ghost_indices[g * 3 + 2];
+            printf("    [%d,%d,%d] rec_val=%.6e, rel_err=%.6e%s\n",
+                   i, j, k, reconstructed[g], rel_err[g],
+                   (rel_err[g] > 0.2) ? " HIGH_ERROR" : "");
+        }
+        
+        // Print details of worst errors
+        if (num_high_err > 0) {
+            printf("  Points with highest errors:\n");
+            std::vector<std::pair<double, int>> err_idx;
+            for (int i = 0; i < m_num_ghost_recon; i++) {
+                err_idx.push_back(std::make_pair(rel_err[i], i));
+            }
+            std::sort(err_idx.begin(), err_idx.end(), std::greater<std::pair<double, int>>());
+            
+            for (int n = 0; n < std::min(5, (int)err_idx.size()); n++) {
+                int g = err_idx[n].second;
+                int i = m_ghost_indices[g * 3 + 0];
+                int j = m_ghost_indices[g * 3 + 1];
+                int k = m_ghost_indices[g * 3 + 2];
+                printf("    [%d,%d,%d] coord=(%.4f,%.4f,%.4f) rec_val=%.6e, rel_err=%.6e\n",
+                       i, j, k,
+                       m_xs_twohalo[i], m_ys_twohalo[j], m_zs_twohalo[k],
+                       reconstructed[g], rel_err[g]);
+            }
+        }
+        printf("===========================================\n\n");
+    }
+    
     // Fill reconstructed values back
     for (int g = 0; g < m_num_ghost_recon; g++) {
         int i = m_ghost_indices[g * 3 + 0];
@@ -111,14 +239,6 @@ if (m_recon_initialized && m_num_ghost_recon > 0) {
     
     // Copy back to device
     ScaLBL_CopyToDevice(Phi_TwoHalo, h_phi_twohalo.data(), N_TwoHalo * sizeof(double));
-    
-    // Optional diagnostics
-    if (rank == 0 && timestep % 100 == 0) {
-        double mean_err = 0.0;
-        for (int i = 0; i < m_num_ghost_recon; i++) mean_err += rel_err[i];
-        mean_err /= m_num_ghost_recon;
-        printf("Reconstruction: mean_err=%.3e, bad_cells=%d\n", mean_err, num_bad);
-    }
 }
 // ============================================================================
 
